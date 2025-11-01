@@ -356,6 +356,98 @@ gen_route_script() {
   echo "GATEWAY0=$gateway"
 }
 
+setup_networkmanager_connections() {
+    debug '# setup /etc/NetworkManager/system-connections'
+
+    mkdir -p "$FOLD/hdd/etc/NetworkManager/system-connections"
+
+    while read -r network_interface; do
+        local ipv4_addrs=($(network_interface_ipv4_addrs "$network_interface"))
+        local ipv6_addrs=($(network_interface_ipv6_addrs "$network_interface"))
+
+        ((${#ipv4_addrs[@]} == 0 && ${#ipv6_addrs[@]} == 0)) && continue
+
+        local predicted_network_interface_name
+        predicted_network_interface_name="$(predict_network_interface_name "$network_interface")"
+
+        local nm_file="/etc/NetworkManager/system-connections/$predicted_network_interface_name.nmconnection"
+        debug "# setting up $nm_file"
+
+        {
+            echo "[connection]"
+            echo "id=$predicted_network_interface_name"
+            echo "uuid=$(uuidgen)"
+            echo "type=ethernet"
+            echo "interface-name=$predicted_network_interface_name"
+            echo "autoconnect=true"
+
+            echo "[ethernet]"
+            echo "mac-address=$(cat /sys/class/net/$network_interface/address)"
+            echo "cloned-mac-address="
+
+            # --- IPv4 Section ---
+            echo "[ipv4]"
+            if ((${#ipv4_addrs[@]} > 0)); then
+                echo "method=manual"
+                local addr_list=""
+                for ip in "${ipv4_addrs[@]}"; do
+                    addr_list+="$ip/24;"  # Adjust netmask if needed
+                done
+                echo "addresses=${addr_list%;}"
+
+                local ipv4_gw
+                ipv4_gw="$(network_interface_ipv4_gateway "$network_interface")"
+                [[ -n "$ipv4_gw" ]] && echo "gateway=$ipv4_gw"
+
+                # Add DNS servers (example: from helper or default)
+                local dns_list
+                dns_list="$(network_interface_ipv4_dns "$network_interface")"  # returns space-separated
+                if [[ -n "$dns_list" ]]; then
+                    echo "dns=$(echo $dns_list | tr ' ' ';')"
+                fi
+
+                # Add static routes
+                local routes
+                routes="$(network_interface_ipv4_routes "$network_interface")"  # format: dest/prefix gateway metric
+                [[ -n "$routes" ]] && echo "routes=$(echo $routes | tr ' ' ';')"
+            else
+                echo "method=auto"
+            fi
+
+            # --- IPv6 Section ---
+            echo "[ipv6]"
+            if ((${#ipv6_addrs[@]} > 0)); then
+                echo "method=manual"
+                local addr_list6=""
+                for ip in "${ipv6_addrs[@]}"; do
+                    addr_list6+="$ip/64;"
+                done
+                echo "addresses=${addr_list6%;}"
+
+                local ipv6_gw
+                ipv6_gw="$(network_interface_ipv6_gateway "$network_interface")"
+                [[ -n "$ipv6_gw" ]] && echo "gateway=$ipv6_gw"
+
+                # Add DNS servers
+                local dns_list6
+                dns_list6="$(network_interface_ipv6_dns "$network_interface")"
+                [[ -n "$dns_list6" ]] && echo "dns=$(echo $dns_list6 | tr ' ' ';')"
+
+                # Add static routes
+                local routes6
+                routes6="$(network_interface_ipv6_routes "$network_interface")"
+                [[ -n "$routes6" ]] && echo "routes=$(echo $routes6 | tr ' ' ';')"
+            else
+                echo "method=auto"
+            fi
+
+        } > "$FOLD/hdd/$nm_file" 2> >(debugoutput)
+
+        chmod 600 "$FOLD/hdd/$nm_file"
+    done < <(physical_network_interfaces)
+}
+
+
 # setup /etc/sysconfig/network-scripts for centos
 setup_etc_sysconfig_network_scripts_centos() {
   debug '# setup /etc/sysconfig/network-scripts'
@@ -828,12 +920,16 @@ setup_network_config() {
       if ((IMG_VERSION <= 90)); then
         setup_etc_sysconfig_network
         setup_etc_sysconfig_network_scripts_centos
+      else
+        setup_networkmanager_connections
       fi
       ;;
     rockylinux|almalinux|rhel)
       setup_etc_sysconfig_network
       if ((IMG_VERSION < 1000)); then
         setup_etc_sysconfig_network_scripts_centos
+      else
+        setup_networkmanager_connections
       fi
       ;;
     suse) setup_etc_sysconfig_network_scripts_suse;;
